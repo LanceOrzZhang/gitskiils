@@ -79,6 +79,23 @@ class Model(dict,metaclass=ModelMetaClass):
                 setattr(self,key,value)
         return value
 
+    @classmethod
+    @asyncio.coroutine
+    def find(cls,pk):
+        'find object by primary key'
+        rs = yield from select('%s where `%s`=?' % (cls.__select__, cls.__primary_key__), [pk], 1)
+        if len(rs) == 0:
+            return None
+        return cls(**rs[0])
+
+    @asyncio.coroutine
+    def save(self):
+        args = list(map(self.getValueOrDefault, self.__fields__))
+        args.append(self.getValueOrDefault(self.__primary_key__))
+        rows = yield from execute(self.__insert__, args)
+        if rows != 1:
+            logging.warn('failed to insert record: affected rows: %s' % rows)
+
 #Field字段类及子类
 class Field(object):
     def __init__(self,name,column_type,primary_key,default):
@@ -93,6 +110,22 @@ class Field(object):
 class StringField(Field):
     def __init__(self, name=None, primary_key=False, default=None,ddl="varchar(100)"):
         super().__init__(name,ddl, primary_key, default)
+
+class BooleanField(Field):
+    def __init__(self, name=None, default=False):
+        super().__init__(name,'boolean', False, default)
+
+class IntgerField(Field):
+    def __init__(self, name=None,primary_key=False, default=0):
+        super().__init__(name,'bigint', primary_key, default)
+
+class FloatField(Field):
+    def __init__(self, name=None, primary_key=False, default=0.0):
+        super().__init__(name,'real', primary_key, default)
+
+class TextField(Field):
+    def __init__(self, name=None ,default=None):
+        super().__init__(name,'text', False, default)
 
 #实现属性及数据库字段映射关系
 class ModelMetaClass(type):
@@ -120,4 +153,17 @@ class ModelMetaClass(type):
                     fields.append(k)
         if not primaryKey:
             raise RuntimeError('Primary key not found.')
-        
+        #清空atrrs
+        for k in mappings.keys():
+            attrs.pop(k)
+        escaped_fields=list(map(lambda f:'`%s`' % f,fields))
+        attrs["__mappings__"]=mappings #保存属性以及列的映射关系
+        attrs["__table__"]=tableName
+        attrs["__primary_key__"]=primaryKey
+        attrs["__fields__"]=fields #除了主键以外的属性名
+        #构造默认的select，update，insert和delete语句
+        attrs['__select__'] = 'select `%s`, %s from `%s`' % (primaryKey, ', '.join(escaped_fields), tableName)
+        attrs['__insert__'] = 'insert into `%s` (%s, `%s`) values (%s)' % (tableName, ', '.join(escaped_fields), primaryKey, create_args_string(len(escaped_fields) + 1))
+        attrs['__update__'] = 'update `%s` set %s where `%s`=?' % (tableName, ', '.join(map(lambda f: '`%s`=?' % (mappings.get(f).name or f), fields)), primaryKey)
+        attrs['__delete__'] = 'delete from `%s` where `%s`=?' % (tableName, primaryKey)
+        return type.__new__(cls, name, bases, attrs)
